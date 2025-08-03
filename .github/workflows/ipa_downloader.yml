@@ -63,7 +63,7 @@ jobs:
           
           echo "::group::Login to App Store"
           # The path prefix is no longer needed after installing with brew
-          ipatool --verbose auth login -e '1256242238@qq.com' -p 'lbwo-xxmn-hsea-fzzf'
+          ipatool --verbose auth login -e '1256242238@qq.com' -p 'Haoming1122'
           echo "::endgroup::"
 
           echo "::group::Download IPA"
