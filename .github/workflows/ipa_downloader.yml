@@ -1,0 +1,133 @@
+# .github/workflows/ipa_downloader.yml
+
+name: IPA Auto Downloader
+
+on:
+  # 触发器：
+  # 1. 允许手动触发 (workflow_dispatch)
+  workflow_dispatch:
+  # 2. 定时触发：使用 cron 语法，这里设置为每天 UTC 时间 0点0分 运行一次
+  #    你可以根据需要修改时间，cron 时间是 UTC 标准时间
+  schedule:
+    - cron: '0 0 * * *'
+
+# 环境变量：请在这里修改为你需要跟踪的应用的 Bundle ID
+env:
+  BUNDLE_ID: com.tencent.xin # <-- 在这里修改为你想要的 App Bundle ID
+
+jobs:
+  download-ipa:
+    # 使用最新的 macOS 运行环境，因为 ipatool 与苹果服务交互
+    runs-on: macos-latest
+
+    # 设置工作流的权限
+    permissions:
+      contents: write # 需要写入权限来提交版本号更新和创建 Release
+
+    steps:
+      # 步骤 1: 检出你的仓库代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 步骤 2: 创建用于存放版本记录和 IPA 文件的目录 (如果不存在)
+      - name: Create directories
+        run: |
+          mkdir -p ./ipas
+          mkdir -p ./versions
+
+      # 步骤 3: 使用苹果官方 API 获取 App Store 上的最新版本号
+      - name: Get Latest App Version from App Store
+        id: app_info
+        run: |
+          # 使用 curl 和 jq 工具查询并解析版本信息
+          APP_STORE_INFO=$(curl -s "https://itunes.apple.com/lookup?bundleId=${{ env.BUNDLE_ID }}&country=cn")
+          LATEST_VERSION=$(echo "$APP_STORE_INFO" | jq -r '.results[0].version')
+          APP_NAME=$(echo "$APP_STORE_INFO" | jq -r '.results[0].trackName')
+          
+          # 将版本号和应用名设置为输出变量，供后续步骤使用
+          echo "version=${LATEST_VERSION}" >> $GITHUB_OUTPUT
+          echo "name=${APP_NAME}" >> $GITHUB_OUTPUT
+          echo "Latest version on App Store: ${LATEST_VERSION} for ${APP_NAME}"
+
+      # 步骤 4: 获取本地记录的已下载版本号
+      - name: Get Locally Stored Version
+        id: local_info
+        run: |
+          VERSION_FILE="./versions/${{ env.BUNDLE_ID }}.txt"
+          if [ -f "$VERSION_FILE" ]; then
+            STORED_VERSION=$(cat "$VERSION_FILE")
+          else
+            STORED_VERSION="0.0.0" # 如果文件不存在，则设置一个初始版本
+          fi
+          # 将本地版本号设置为输出变量
+          echo "version=${STORED_VERSION}" >> $GITHUB_OUTPUT
+          echo "Last downloaded version: ${STORED_VERSION}"
+
+      # 步骤 5: 比较版本号，如果 App Store 版本更新，则执行后续步骤
+      - name: Compare versions and download if new
+        # 使用 if 条件判断：只有当两个版本号不一致时才运行
+        if: steps.app_info.outputs.version != steps.local_info.outputs.version
+        run: |
+          echo "New version found! Current: ${{ steps.app_info.outputs.version }}, Stored: ${{ steps.local_info.outputs.version }}"
+          echo "Starting download process..."
+          
+          # 安装 Go 环境
+          # go get 在新版 Go 中已不推荐，使用 go install
+          echo "::group::Install Go"
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          brew install go
+          echo "::endgroup::"
+
+          # 安装 ipatool
+          echo "::group::Install ipatool"
+          go install github.com/majd/ipatool@latest
+          echo "::endgroup::"
+          
+          # 使用 GitHub Secrets 登录 Apple ID
+          echo "::group::Login to App Store"
+          ~/go/bin/ipatool auth login --email "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}"
+          echo "::endgroup::"
+
+          # 下载 IPA 文件
+          echo "::group::Download IPA"
+          IPA_FILENAME="${{ steps.app_info.outputs.name }}-${{ steps.app_info.outputs.version }}.ipa"
+          ~/go/bin/ipatool download --bundle-identifier "${{ env.BUNDLE_ID }}" -o "./ipas/${IPA_FILENAME}" --purchase
+          echo "::endgroup::"
+          
+          # 将文件名设置为环境变量，供上传步骤使用
+          echo "IPA_PATH=./ipas/${IPA_FILENAME}" >> $GITHUB_ENV
+          echo "RELEASE_TAG=${{ steps.app_info.outputs.name }}-${{ steps.app_info.outputs.version }}" >> $GITHUB_ENV
+          echo "RELEASE_NAME=${{ steps.app_info.outputs.name }} v${{ steps.app_info.outputs.version }}" >> $GITHUB_ENV
+          
+
+      # 步骤 6: 创建 GitHub Release 并上传 IPA 文件
+      # 同样，此步骤也仅在版本号更新时运行
+      - name: Create Release and Upload IPA
+        if: steps.app_info.outputs.version != steps.local_info.outputs.version
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.RELEASE_NAME }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: ${{ env.IPA_PATH }} # 上传的 IPA 文件路径
+          body: |
+            App: ${{ steps.app_info.outputs.name }}
+            Version: ${{ steps.app_info.outputs.version }}
+            Bundle ID: ${{ env.BUNDLE_ID }}
+            Auto-downloaded by GitHub Actions.
+
+      # 步骤 7: 更新本地的版本记录文件并推送到仓库
+      # 同样，此步骤也仅在版本号更新时运行
+      - name: Update and Push Version File
+        if: steps.app_info.outputs.version != steps.local_info.outputs.version
+        run: |
+          # 更新版本文件
+          echo "${{ steps.app_info.outputs.version }}" > "./versions/${{ env.BUNDLE_ID }}.txt"
+          
+          # 配置 Git
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          
+          # 添加、提交并推送文件
+          git add ./versions/${{ env.BUNDLE_ID }}.txt
+          git commit -m "chore: Update ${{ steps.app_info.outputs.name }} to version ${{ steps.app_info.outputs.version }}"
+          git push
