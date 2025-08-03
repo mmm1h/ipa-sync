@@ -80,7 +80,7 @@ jobs:
 
           # 安装 ipatool
           echo "::group::Install ipatool"
-          go install github.com/majd/ipatool@latest
+          go install github.com/majd/ipatool/cmd/ipatool@latest
           echo "::endgroup::"
           
           # 使用 GitHub Secrets 登录 Apple ID
